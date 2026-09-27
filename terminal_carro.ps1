@@ -1,4 +1,6 @@
-﻿# Terminal Bluetooth para el seguidor de línea.
+# Terminal Bluetooth para el seguidor de linea.
+# (Archivo solo ASCII, sin tildes: asi funciona aunque se copie o se guarde
+#  con otra codificacion.)
 #   - Busca sola el puerto COM de "SeguidorV88".
 #   - Si el carro se apaga, espera y se RECONECTA SOLA al encenderlo.
 #   - Guarda todo en logs\AAAAMMDD_HHMMSS.log
@@ -6,7 +8,7 @@
 #   - "salir" (o cerrar la ventana) para terminar. Ctrl+C NO la cierra.
 #   - Copiar texto: seleccionarlo con el mouse y clic derecho (o Enter).
 param(
-  [string]$Puerto = "",               # vacío = buscar por nombre
+  [string]$Puerto = "",               # vacio = buscar por nombre
   [string]$Nombre = "SeguidorV88"
 )
 
@@ -15,7 +17,7 @@ $ErrorActionPreference = "Stop"
 # Solo una terminal a la vez: dos compiten por el puerto y ninguna conecta
 $mutex = New-Object System.Threading.Mutex($false, "Global\terminal_carro")
 if (-not $mutex.WaitOne(0)) {
-  Write-Host "Ya hay otra terminal del carro abierta. Usa esa o ciérrala primero." -ForegroundColor Red
+  Write-Host "Ya hay otra terminal del carro abierta. Usa esa o cierrala primero." -ForegroundColor Red
   exit 1
 }
 $carpetaLogs = Join-Path $PSScriptRoot "logs"
@@ -23,7 +25,7 @@ New-Item -ItemType Directory -Force $carpetaLogs | Out-Null
 $archivoLog = Join-Path $carpetaLogs ((Get-Date -Format "yyyyMMdd_HHmmss") + ".log")
 
 function Buscar-Puerto {
-  # El puerto SALIENTE lleva la dirección del dispositivo en su ID; se
+  # El puerto SALIENTE lleva la direccion del dispositivo en su ID; se
   # compara con la del dispositivo emparejado que se llama $Nombre.
   $dev = Get-PnpDevice -ErrorAction SilentlyContinue |
          Where-Object { $_.FriendlyName -eq $Nombre -and $_.InstanceId -like 'BTHENUM\DEV_*' } |
@@ -45,7 +47,7 @@ function Escribir($texto, $color = $null) {
 
 if (-not $Puerto) { $Puerto = Buscar-Puerto }
 if (-not $Puerto) {
-  Write-Host "No encuentro el puerto de '$Nombre'. ¿Está emparejado? Usa: -Puerto COM8" -ForegroundColor Red
+  Write-Host "No encuentro el puerto de '$Nombre'. Esta emparejado? Usa: -Puerto COM8" -ForegroundColor Red
   exit 1
 }
 
@@ -58,7 +60,7 @@ $avisadoEspera = ""
 [Console]::TreatControlCAsInput = $true   # Ctrl+C no cierra la terminal
 
 while ($true) {
-  # ---------- Conectar (reintenta hasta que el carro esté encendido) ----------
+  # ---------- Conectar (reintenta hasta que el carro este encendido) ----------
   $sp = New-Object System.IO.Ports.SerialPort $Puerto, 115200
   $sp.ReadTimeout  = 200
   $sp.WriteTimeout = 1500
@@ -66,7 +68,7 @@ while ($true) {
   try {
     $sp.Open()
   } catch {
-    # Mostrar el motivo cada vez que cambia (ayuda a saber qué pasa)
+    # Mostrar el motivo cada vez que cambia (ayuda a saber que pasa)
     $motivo = $_.Exception.InnerException.Message
     if (-not $motivo) { $motivo = $_.Exception.Message }
     if ($avisadoEspera -ne $motivo) {
@@ -89,7 +91,7 @@ while ($true) {
     while ($true) {
       $datos = $sp.ReadExisting()
       if ($datos) {
-        if ($linea) { Write-Host "" }                 # no pisar lo que estás escribiendo
+        if ($linea) { Write-Host "" }                 # no pisar lo que estas escribiendo
         Escribir $datos
         if ($linea) { Write-Host "> $linea" -NoNewline -ForegroundColor Cyan }
       }
@@ -116,8 +118,8 @@ while ($true) {
         }
       }
 
-      # Latido: una línea vacía (el carro la ignora). Si no se puede enviar,
-      # el carro se apagó -> reconectar.
+      # Latido: una linea vacia (el carro la ignora). Si no se puede enviar,
+      # el carro se apago -> reconectar.
       if (((Get-Date) - $ultimoLatido).TotalSeconds -ge 2) {
         $sp.WriteLine("")
         $ultimoLatido = Get-Date
