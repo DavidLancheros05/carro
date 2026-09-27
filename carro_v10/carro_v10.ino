@@ -585,14 +585,20 @@ void pruebaVelocidad() {
   detener(msg);
 }
 
-// 4: motores apagados, muestra lo que ven los sensores.
+// 4: motores apagados, muestra lo que ven los sensores. Solo cuando
+// cambian (o cada 1 s): mandar menos datos por Bluetooth, porque mientras
+// el carro envía mucho se han perdido comandos.
 void pruebaSensores() {
   static unsigned long tLog = 0;
+  static char anterior[NUM_SENSORES + 1] = "";
   motores(0, 0);
-  if (millis() - tLog < 50) return;
-  tLog = millis();
   char sens[NUM_SENSORES + 1];
   textoSensores(sens);
+  bool cambio = strcmp(sens, anterior) != 0;
+  if (!cambio && millis() - tLog < 1000) return;
+  if (cambio && millis() - tLog < 20) return;
+  tLog = millis();
+  strcpy(anterior, sens);
   responder("sens=%s", sens);
 }
 
