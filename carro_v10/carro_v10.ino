@@ -155,6 +155,7 @@ const int   MAX_SPEED       = 170;
 const float VEL_MAX         = 0.6;
 const float UMBRAL_PIVOTE   = 4.3;
 const float UMBRAL_BORDE    = 4.0f;   // la línea se fue por el borde
+const int   N_PEGADO       = 100;    // 0.3 s de marca sin parar = sensor pegado
 const float UMBRAL_TENDENCIA = 0.02f; // |v| mínima para saber hacia dónde iba la línea
 const float EVID_DECAE      = 0.98f;  // por muestra: la evidencia se olvida en ~100 ms
 const float FRACCION_VIEJA  = 0.9f;   // línea vista tras 0.9·T_180 = rama vieja
@@ -220,6 +221,7 @@ int   histIdx = 0, histLlenas = 0;
 
 float         evidencia       = 0;   // + = hay marcas a la izquierda, - = derecha
 unsigned long ultimaVezPropia = 0;
+int           negroSeguido[NUM_SENSORES];   // muestras seguidas viendo marca
 bool          lineaVista      = false;   // se vio la línea desde el arranque
 int           muestrasBlanco  = 0;
 
@@ -418,6 +420,7 @@ void iniciarCorrida() {
   muestrasBlanco  = 0;
   ultimaVezPropia = millis();
   lineaVista      = false;
+  for (int i = 0; i < NUM_SENSORES; i++) negroSeguido[i] = 0;
   calibBlanco     = 0;
   calibAnterior   = 0;
   calibPasada     = 0;
@@ -477,11 +480,20 @@ void seguir() {
   int   nPropia = 0, nNegros = 0;
   float ev = 0;
   for (int i = 0; i < NUM_SENSORES; i++) {
-    if (!b[i]) continue;
+    if (!b[i]) { negroSeguido[i] = 0; continue; }
     nNegros++;
     float d = PESOS[i] - ref;
-    if (fabs(d) <= DIST_PROPIA) { sumaPropia += PESOS[i]; nPropia++; }
-    else                        ev += (d > 0) ? 1.0f : -1.0f;
+    if (fabs(d) <= DIST_PROPIA) { sumaPropia += PESOS[i]; nPropia++; negroSeguido[i] = 0; continue; }
+    // Marca al costado. La rama de una V pasa por un sensor en < 0.1 s; un
+    // sensor negro sin parar es otra cosa (potenciómetro muy sensible, piso
+    // oscuro): no cuenta, y lo que ya sumó se borra.
+    if (negroSeguido[i] < N_PEGADO) negroSeguido[i]++;
+    if (negroSeguido[i] == N_PEGADO - 1) {
+      evidencia = 0;
+      logEvento("SENSOR %d PEGADO EN NEGRO: no cuenta como marca", i + 1);
+    }
+    if (negroSeguido[i] >= N_PEGADO - 1) continue;
+    ev += (d > 0) ? 1.0f : -1.0f;
   }
   evidencia = evidencia * EVID_DECAE + ev;
   muestrasBlanco = (nNegros == 0) ? muestrasBlanco + 1 : 0;
