@@ -161,9 +161,10 @@ terminar, `modo 0`.
 **Prueba 1 - Velocidad real**
 1. Pegar una cinta métrica o marcar el piso en una zona recta y lisa (no hace falta línea).
 2. Poner el carro con el eje sobre la marca 0. `modo 1`, `go`.
-3. A los 3 s avanza derecho 2 s (`prectams 2000`) y se detiene.
+3. A los 3 s avanza derecho 2 s (`prectams 2000`) a PWM 80 y se detiene.
 4. Medir la distancia recorrida por el eje. Velocidad = distancia / 2 s (por ejemplo 60 cm → 30 cm/s).
-5. Repetir con `prectapwm 80`, que es la velocidad con la que llega a las V (`aprox`).
+5. Viene con `prectapwm 80`, la velocidad con la que llega a las V (`aprox`). Repetir con
+   `prectapwm 115` (la velocidad normal).
 6. Si se desvía mucho hacia un lado, anotarlo: los dos motores no rinden igual.
 
 **Prueba 2 - Frenado en la V**

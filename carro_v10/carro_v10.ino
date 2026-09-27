@@ -67,7 +67,7 @@
 //     guardar      guarda los parámetros: sobreviven al apagar
 //     fabrica      vuelve a los valores del código (y borra lo guardado)
 //     go           arranca en 3 s (tiempo para soltarlo)
-//     stop  (o x)  detiene los motores ya
+//     stop  (o x)  detiene los motores ya (x no necesita Enter)
 //   Al encender el carro espera "go", salvo que "auto" sea 1.
 //   Día de carrera: "auto 1", "log 0", "guardar".
 //
@@ -141,11 +141,12 @@ unsigned long T_SOLO_MARCA_MS = 150;        // (tsolomarca) solo se ve la otra m
 //------------- GIRO ----------------
 int   N_BLANCO_GIRO = 5;                    // (nblanco) en la V: ver blanco antes
 float REENG_E       = 1.0f;                 // (reeng)   reenganchar con |e| <= esto
-unsigned long T_180_MS = 0;                 // (t180)    giro de 180°; 0 = sin red
+unsigned long T_180_MS = 500;               // (t180)    giro de 180°; 0 = sin red
+                                            //   medido 482 ms (prueba 5, 2026-09-27) + margen
 
 //------------- PRUEBAS ----------------
 unsigned long T_PRUEBA_RECTA_MS = 2000;     // (prectams)  prueba 1: tiempo andando
-int           PWM_PRUEBA_RECTA  = 115;      // (prectapwm) prueba 1: probar 115 y 80
+int           PWM_PRUEBA_RECTA  = 80;       // (prectapwm) prueba 1: 80 = aprox; luego probar 115
 int           LADO_PRUEBA       = +1;       // (lado)      prueba 3: +1 izq, -1 der
 
 //------------- FIJOS (no se ajustan por Bluetooth) ----------------
@@ -154,6 +155,7 @@ const int   MAX_SPEED       = 170;
 const float VEL_MAX         = 0.6;
 const float UMBRAL_PIVOTE   = 4.3;
 const float UMBRAL_BORDE    = 4.0f;   // la línea se fue por el borde
+const float UMBRAL_TENDENCIA = 0.02f; // |v| mínima para saber hacia dónde iba la línea
 const float EVID_DECAE      = 0.98f;  // por muestra: la evidencia se olvida en ~100 ms
 const float FRACCION_VIEJA  = 0.9f;   // línea vista tras 0.9·T_180 = rama vieja
 const unsigned long T_ARRANQUE_MS = 3000;   // de "go" a moverse
@@ -506,9 +508,15 @@ void seguir() {
     return;
   }
 
-  // Se perdió por dentro: puede estar en el hueco entre dos sensores
+  // Se perdió por dentro: está en el hueco entre dos sensores (la prueba 4
+  // mostró que cada sensor ve un punto angosto: pasa en cada cambio de
+  // sensor). Está al lado del último sensor, hacia donde se venía moviendo.
   if (sinPropia < T_HUECO_MS) {
-    float e = (fabs(ultimoError) <= 1.0f) ? 0 : ultimoError;
+    float e;
+    if      (velocidadError >  UMBRAL_TENDENCIA) e = ultimoError + 1.0f;
+    else if (velocidadError < -UMBRAL_TENDENCIA) e = ultimoError - 1.0f;
+    else    e = (fabs(ultimoError) <= 1.0f) ? 0 : ultimoError;
+    e = constrain(e, -UMBRAL_BORDE, UMBRAL_BORDE);
     aplicarControl(e, "HUEC");
     logEstado(e);
     return;
@@ -749,10 +757,19 @@ void ejecutarComando(char* linea) {
 void leerComandos() {
   static char buf[64];
   static int  n = 0;
+  static bool saltarLinea = false;
   while (SerialBT.available()) {
     char c = SerialBT.read();
     if (c == '\n' || c == '\r') {
       if (n > 0) { buf[n] = '\0'; ejecutarComando(buf); n = 0; }
+      saltarLinea = false;
+    } else if (saltarLinea && c != 'x' && c != 'X') {
+      // resto de una línea que empezó con x: se descarta
+    } else if ((n == 0 || saltarLinea) && (c == 'x' || c == 'X')) {
+      // x al inicio de línea detiene YA, sin esperar el Enter (se han
+      // perdido comandos mientras el carro envía el log)
+      detener("comando stop");
+      saltarLinea = true;
     } else if (n < (int)sizeof(buf) - 1) {
       buf[n++] = c;
     }
