@@ -515,7 +515,10 @@ void seguir() {
     float e;
     if      (velocidadError >  UMBRAL_TENDENCIA) e = ultimoError + 1.0f;
     else if (velocidadError < -UMBRAL_TENDENCIA) e = ultimoError - 1.0f;
-    else    e = (fabs(ultimoError) <= 1.0f) ? 0 : ultimoError;
+    // Sin tendencia: corregir hacia el último sensor visto, nunca derecho.
+    // Así la línea sale del hueco y cae en un sensor; si se fuera derecho
+    // podría quedarse en el hueco más de T_HUECO_MS y parecer una V.
+    else    e = ultimoError;
     e = constrain(e, -UMBRAL_BORDE, UMBRAL_BORDE);
     aplicarControl(e, "HUEC");
     logEstado(e);
