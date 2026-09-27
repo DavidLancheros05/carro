@@ -1,0 +1,47 @@
+﻿
+[CONECTADO 13:25:51]
+
+> ?
+Comandos:
+  ver           muestra los parametros
+  <param> <n>   cambia un parametro. Ej: aprox 70 | modo 2
+  guardar       guarda (se mantiene al apagar)
+  fabrica       vuelve a los valores del codigo
+  go            arranca en 3 s
+  stop / x      detiene ya
+Modos: 0 carrera, 1 velocidad, 2 frenado, 3 giro, 4 sensores, 5 calibrar
+
+> VER
+--- parametros (detenido) ---
+  modo        0
+  auto        0
+  log         1
+  base        110
+  velmin      85
+  aprox       80
+  girorap     170
+  girorev     -60
+  velgiro     105
+  kp          20.00
+  kd          150.00
+  frenoe      12.00
+  frenov      80.00
+  distprop    3.00
+  evidv       3.00
+  evidaprox   1.00
+  nfinv       2
+  thueco      150
+  tsolomarca  150
+  nblanco     5
+  reeng       1.00
+  t180        0
+  prectams    2000
+  prectapwm   115
+  lado        1
+
+> modo5
+No entiendo "modo5". Escribe ? para ver los comandos
+
+> modo 5
+  modo        5
+  (activo ya; 'guardar' para que quede al apagar)

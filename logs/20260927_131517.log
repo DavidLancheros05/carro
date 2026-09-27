@@ -1,0 +1,86 @@
+﻿
+[CONECTADO 13:15:21]
+
+> ?
+Comandos:
+  ver           muestra los parametros
+  <param> <n>   cambia un parametro. Ej: aprox 70 | modo 2
+  guardar       guarda (se mantiene al apagar)
+  fabrica       vuelve a los valores del codigo
+  go            arranca en 3 s
+  stop / x      detiene ya
+Modos: 0 carrera, 1 velocidad, 2 frenado, 3 giro, 4 sensores, 5 calibrar
+
+> ver
+--- parametros (detenido) ---
+  modo        0
+  auto        0
+  log         1
+  base        110
+  velmin      85
+  aprox       80
+  girorap     170
+  girorev     -60
+  velgiro     105
+  kp          20.00
+  kd          150.00
+  frenoe      12.00
+  frenov      80.00
+  distprop    3.00
+  evidv       3.00
+  evidaprox   1.00
+  nfinv       2
+  thueco      150
+  tsolomarca  150
+  nblanco     5
+  reeng       1.00
+  t180        0
+  prectams    2000
+  prectapwm   115
+  lado        1
+
+> 0
+No entiendo "0". Escribe ? para ver los comandos
+
+> ?
+Comandos:
+  ver           muestra los parametros
+  <param> <n>   cambia un parametro. Ej: aprox 70 | modo 2
+  guardar       guarda (se mantiene al apagar)
+  fabrica       vuelve a los valores del codigo
+  go            arranca en 3 s
+  stop / x      detiene ya
+Modos: 0 carrera, 1 velocidad, 2 frenado, 3 giro, 4 sensores, 5 calibrar
+
+> ver
+--- parametros (detenido) ---
+  modo        0
+  auto        0
+  log         1
+  base        110
+  velmin      85
+  aprox       80
+  girorap     170
+  girorev     -60
+  velgiro     105
+  kp          20.00
+  kd          150.00
+  frenoe      12.00
+  frenov      80.00
+  distprop    3.00
+  evidv       3.00
+  evidaprox   1.00
+  nfinv       2
+  thueco      150
+  tsolomarca  150
+  nblanco     5
+  reeng       1.00
+  t180        0
+  prectams    2000
+  prectapwm   115
+  lado        1
+
+[SE CORTO LA CONEXION 13:18:43 - reconectando...]
+
+[esperando al carro en COM9... (Se agotó el tiempo de espera del semáforo.
+)]

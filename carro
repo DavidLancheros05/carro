@@ -1,0 +1,1131 @@
+//=====================================================================
+//                SEGUIDOR DE LÍNEA - VERSIÓN v8.8
+//                       ESP32 + L298N
+//
+// Base: v8.7 (v8.6 validada en pista). Cambios de v8.8, todos
+// orientados a las V CERRADAS del zigzag:
+//
+// [1] CAUSA PRINCIPAL DEL FALLO EN LA V (se salía al otro lado):
+//     la rama de salida de la V enciende solo 1-2 sensores (cruza los
+//     sensores en ángulo tendido), así que NO es "banda ancha" y el
+//     modo VEE de la v8.7 nunca se activaba. En su lugar se activaba
+//     el GUIADO POR RAMA PARALELA, que por diseño pivota hacia el lado
+//     CONTRARIO de la marca (dirGuiado = lado de la predicción).
+//     Resultado: al llegar al vértice el robot giraba al revés.
+//
+//     Solución: una marca lejana solo se considera "rama paralela" si
+//     antes se vio CONVIVIENDO con la línea propia (N_CONFIRMA_JUNTAS
+//     muestras). Es la diferencia física real: la paralela acompaña a
+//     la propia; la rama de una V aparece justo cuando la propia se
+//     acaba. Si no hay convivencia previa reciente -> es una V.
+//
+// [2] MODO VEE AHORA ES UN ESTADO, NO UNA MUESTRA SUELTA.
+//     Al confirmar la V, el robot pivota SOBRE SU EJE hacia la rama
+//     (SPEED_VEE) hasta que la rama queda razonablemente centrada
+//     (|centroide| <= TOL_REENGANCHE_VEE) y pasó al menos T_VEE_MIN_MS.
+//     Con los sensores 11 cm adelante del eje, un PD normal no alcanza
+//     a girar lo suficiente en un vértice cerrado: hay que pivotar.
+//     Si se pasa de T_VEE_MAX_MS sin reenganchar -> búsqueda.
+//
+// [3] LADO DE SOSPECHA ABSOLUTO, NO RELATIVO A LA PREDICCIÓN.
+//     Antes: lado = signo(marca - prediccion). Si la marca estaba en
+//     +1 y la predicción en +3 decía "derecha" con la línea a la
+//     izquierda. Ahora: lado = signo(marca) respecto al centro.
+//
+// [4] La banda ancha descentrada (VEE de la v8.7) sigue existiendo y
+//     ahora entra al mismo estado VEE en vez de actuar una sola
+//     muestra. El cruce perpendicular centrado sigue igual (CRUZ).
+//
+// [5] Se eliminó el ENFRIAMIENTO/PERSISTENCIA post-guiado: su función
+//     (recuperarse de un guiado equivocado) la cubre ahora el olvido
+//     de la paralela (paralelaConocida = false al rendirse el guiado).
+//
+//---------------------------------------------------------------------
+// HARDWARE Y GEOMETRÍA (sin cambios)
+//---------------------------------------------------------------------
+//   - 6 sensores IR digitales en fila, separados 1.56 cm (8 cm de
+//     extremo a extremo). HIGH = negro. Línea de ~1.8 cm; el ancho de
+//     DETECCIÓN es menor, así que la línea puede caer en el hueco
+//     entre dos sensores sin que ninguno la vea.
+//   - Sensores 11 cm adelante del eje de las ruedas.
+//   - L298N: motor A = rueda DERECHA, motor B = rueda IZQUIERDA.
+//   - Pista: circuito cerrado con rectas, curvas, una rama de regreso
+//     paralela, al menos un cruce perpendicular y varias V cerradas.
+//
+//---------------------------------------------------------------------
+// MODOS (visibles en el log)
+//---------------------------------------------------------------------
+//   PROP  Seguimiento normal PD + frenado dinámico.
+//   PIVO  Pivote con rueda interior en reversa (línea en el extremo).
+//   MEM   Línea perdida hace <250 ms: se extrapola (hueco de sensores).
+//   CENT  Línea en el hueco central (entre sensor 3 y 4): seguir derecho.
+//   CRUZ  Banda ancha CENTRADA: cruce perpendicular, mantener rumbo.
+//   VEE   V cerrada detectada: pivote en el sitio hacia la rama nueva.
+//   GUIA  Rama paralela usada como faro para volver a la propia.
+//   BUSQ  Línea perdida de verdad: pivote de búsqueda.
+//   RETR  Se salió: reversa derecho hasta volver a ver la línea, y
+//         desde ahí gira en la V, busca o sigue normal.
+//
+//---------------------------------------------------------------------
+// VALIDACIÓN SUGERIDA (en este orden, DEBUG 1)
+//---------------------------------------------------------------------
+//   1) Una V aislada, despacio (BASE_SPEED 140-150): esperar
+//      "VEE POR FIN DE LINEA" y luego "REENGANCHE VEE".
+//   2) El cruce perpendicular: debe seguir dando modo=CRUZ, nunca VEE.
+//   3) El tramo de rama paralela: debe aparecer "PARALELA CONFIRMADA"
+//      mientras se ven las dos, y GUIA solo cuando se pierde la propia.
+//   4) Vuelta completa. Después subir BASE_SPEED de a 15-20.
+//
+// AJUSTES SI ALGO FALLA:
+//   - La V se detecta pero el robot no alcanza a girar: subir SPEED_VEE
+//     o bajar BASE_SPEED (llega con menos inercia al vértice).
+//   - El robot pivota de más y se pasa: bajar T_VEE_MIN_MS o subir
+//     TOL_REENGANCHE_VEE.
+//   - El cruce perpendicular dispara VEE: subir N_MUESTRAS_VEE_GRUPO
+//     (3 -> 4) o UMBRAL_CENTRO_CRUZ (1.8 -> 2.2).
+//   - En el tramo paralelo se engancha a la rama equivocada: bajar
+//     N_CONFIRMA_JUNTAS (8 -> 5) para reconocer la paralela más rápido.
+//=====================================================================
+
+// ====================================================================
+// VARIANTE BLUETOOTH (para sintonizar sin cable).
+//   - El log sale por Bluetooth clásico del ESP32, no por USB.
+//   - En el PC (o celular) aparece como puerto COM al emparejar.
+//   - Nombre con que se anuncia: "SeguidorV88".
+//   - SOLO PARA PRUEBAS a baja velocidad. Día de carrera: DEBUG 0.
+// ====================================================================
+#include "BluetoothSerial.h"
+#include "esp_system.h"
+#if !defined(CONFIG_BT_ENABLED) || !defined(CONFIG_BLUEDROID_ENABLED)
+  #error "Bluetooth no habilitado. Herramientas->Partition Scheme: opcion con BT/SPIFFS"
+#endif
+BluetoothSerial SerialBT;
+
+#define DEBUG 1   // 1 = telemetria por Bluetooth, 0 = apagado (carrera)
+
+//------------- SENSORES ----------------
+const int  NUM_SENSORES = 6;
+const byte PINES_SENSORES[NUM_SENSORES] = {17, 16, 33, 32, 35, 34};
+const float PESOS[NUM_SENSORES] = {5, 3, 1, -1, -3, -5};
+
+//------------- L298N ----------------
+// En este robot: motor A = rueda DERECHA, motor B = rueda IZQUIERDA.
+const byte ENA = 25;
+const byte ENB = 26;
+const byte IN1 = 27;
+const byte IN2 = 14;
+const byte IN3 = 13;
+const byte IN4 = 4;
+
+//------------- CONTROL ----------------
+const unsigned long PERIODO_US = 3000;   // 3 ms por muestra
+const int   BASE_SPEED     = 115;   // era 140: iba muy rapido a las V
+const int   MAX_SPEED      = 170;   // era 200: menos corriente pico
+float       Kp             = 20.0;   // era 27: con BASE_SPEED 115 zigzagueaba ±3 en la recta
+float       Kd             = 150.0;
+const float UMBRAL_PIVOTE  = 4.3;
+const float UMBRAL_SALTO   = 2.5;
+const int   GIRO_RAPIDO    = 170;   // era 220 (se recortaba a 200): giro muy brusco
+// true  = ninguna rueda va en reversa: en los giros la rueda de adentro
+//         queda en 0 (menos corriente, sin inversión de giro).
+// false = giro en el sitio con una rueda en reversa (más cerrado, pero
+//         pide más corriente).
+const bool  GIRO_SIN_REVERSA = false;  // con la rampa ya no se reinicia; en el sitio gira más cerrado
+const float FACTOR_UNA_RUEDA = 1.4f;  // la rueda de afuera empuja sola: un poco más de PWM
+const int   GIRO_REVERSA   = GIRO_SIN_REVERSA ? 0 : -60;   // era -80
+const int   SPEED_BUSQUEDA = 100;   // era 120
+// Límite de corriente (evita que caiga el voltaje y se reinicie el ESP32):
+const int   RAMPA_PWM       = 12;   // cambio máx. de PWM cada 3 ms (0 a 120 en ~30 ms)
+const int   PAUSA_INVERSION = 5;    // ciclos en 0 antes de invertir un motor (15 ms)
+
+//------------- FRENADO DINAMICO ----------------
+const float FRENO_ERROR      = 12.0;
+const float FRENO_VEL        = 80.0;
+const int   VEL_MINIMA_CURVA = 90;
+
+//------------- HISTORIAL / TRAYECTORIA ----------------
+const int   HIST = 5;
+const float VEL_MAX = 0.6;
+const float EXTRAPOLACION_MAX = 1.5;
+
+//------------- PÉRDIDA DE LÍNEA ----------------
+const unsigned long T_MEMORIA_MS = 250;   // era 120: la línea en un hueco entre sensores tardaba más en reaparecer
+const float UMBRAL_BORDE  = 4.0;
+const float VEL_SALIDA    = 0.20;
+// Hueco central: entre el sensor 3 y el 4 la línea no se ve. Si se
+// pierde desde e=±1 sin ir saliendo, va CENTRADA: seguir derecho.
+const unsigned long T_CENTRO_MS = 250;   // era 400: en un vértice sin marca se pasaba mucho
+// Al reengancharse girando en el sitio, la línea viene barriendo hacia el
+// centro: se precarga esta velocidad de error para que el Kd frene el giro.
+const float AMORT_REENGANCHE = 0.35f;  // 0.6 con Kp=20 corregía al revés y se salía
+
+//------------- CRUCES ----------------
+const unsigned long T_CRUZ_MAX_MS = 400;
+const float UMBRAL_CENTRO_CRUZ = 1.8f;
+const int   N_MUESTRAS_VEE     = 2;      // banda ancha descentrada
+const unsigned long T_SOSPECHA_V_MS = 250;
+
+//------------- V CERRADA (v8.8) ----------------
+// Muestras consecutivas con una marca nueva estable, sin nada cerca de
+// la predicción, para declarar "rama de salida de V":
+const int   N_MUESTRAS_VEE_GRUPO = 3;    // 9 ms
+// Pivote de V:
+const int   SPEED_VEE            = 105;  // era 160 -> 130: giraba muy rapido y se pasaba
+const unsigned long T_VEE_MIN_MS = 60;   // giro mínimo antes de reenganchar
+const unsigned long T_VEE_MAX_MS = 2200; // se rinde -> búsqueda (a 160 tardó 519 ms; a 105 tarda ~800+)
+const float TOL_REENGANCHE_VEE   = 3.0f; // rama ya suficientemente centrada
+// Vértice por FUSIÓN: se veía otra marca junto a la propia y de pronto
+// desaparece mientras la propia se corre hacia ella (101000 -> 111000).
+// Una paralela nunca se funde con la propia; la rama de una V sí.
+const unsigned long T_FUSION_MS  = 60;   // la marca se vio hace menos de esto
+const unsigned long T_VERTICE_MS = 1000; // si se pierde la línea en este tiempo -> VEE
+// Aproximación a la V: mientras se ve la otra rama, bajar la velocidad
+// para llegar al vértice con poca inercia.
+const int   VEL_APROX_V          = 80;
+const unsigned long T_APROX_V_MS = 400;  // sigue despacio este tiempo tras dejar de verla
+
+//------------- BÚSQUEDA ----------------
+const unsigned long T_BUSQUEDA_LIBRE_MS = 500;
+
+//------------- RETROCESO ----------------
+// Si se sale de la línea: primero echar reversa (derecho) hasta volver a
+// verla, y recién ahí hacer lo que tocaba (girar en la V, buscar o seguir).
+const int           VEL_RETROCESO  = 90;
+const unsigned long T_RETRO_MAX_MS = 700;   // si no la ve en este tiempo, sigue igual
+// Si vuelve a perderse poco después de un retroceso, seguir derecho no
+// sirve (volvería a salirse en el mismo sitio): retroceder y BUSCAR.
+const unsigned long T_REPITE_RETRO_MS = 1500;
+
+//------------- LÍNEAS PARALELAS ----------------
+const float TOL_TRACK_PARALELA = 2.5;
+const int   MAX_GUIADO_PARALELA = 150;
+const float TOL_CANDIDATO  = 1.5;
+const int   N_CONFIRMACION_GUIADO = 5;
+const float ALFA_RASTREO = 0.5f;
+// v8.8: una marca solo cuenta como rama paralela si convivió con la
+// propia durante estas muestras, y si eso pasó hace poco.
+const int   N_CONFIRMA_JUNTAS = 8;
+const unsigned long T_PARALELA_VIGENTE_MS = 600;
+
+//------------- VARIABLES GLOBALES ----------------
+bool  b[NUM_SENSORES];
+bool  bAnterior[NUM_SENSORES];
+float ultimoError = 0;
+
+float historial[HIST];
+int   histIdx    = 0;
+int   histLlenas = 0;
+float velocidadError = 0;
+
+unsigned long ultimaMuestraUs   = 0;
+unsigned long ultimaDeteccionMs = 0;
+int   muestrasSinLinea = 0;
+
+// Estado de búsqueda
+bool          enBusqueda       = false;
+int           ladoSalida       = 0;
+unsigned long inicioBusquedaMs = 0;
+
+// Candidato lejano (se reusa para confirmar la rama de V)
+bool  candidatoActivo   = false;
+float valorCandidato    = 0;
+int   contadorCandidato = 0;
+
+// Modo guiado por paralela
+bool  guiadoActivo    = false;
+float paralelaPos     = 0;
+float dirGuiado       = 0;
+int   muestrasGuiado  = 0;
+int   confirmGuiado   = 0;
+float posConfirm      = 0;
+
+// v8.8: memoria de la rama paralela REAL (vista junto a la propia)
+bool          paralelaConocida = false;
+float         paralelaPosVista = 0;
+int           contJuntas       = 0;
+unsigned long tParalelaVista   = 0;
+
+// Modo cruz
+bool          enCruz       = false;
+unsigned long inicioCruzMs = 0;
+
+// Detección de V
+int           contadorVee   = 0;   // banda ancha descentrada
+int           ladoSospechaV = 0;   // +1 = marca a la izquierda, -1 derecha
+unsigned long tSospechaV    = 0;
+
+// v8.8: estado VEE
+bool          enVee       = false;
+bool          pedirVee    = false;
+int           ladoVee     = 0;
+unsigned long inicioVeeMs = 0;
+
+// Vértice detectado por fusión de ramas
+int           ladoVertice = 0;     // +1 = rama a la izquierda, -1 derecha
+unsigned long tVertice    = 0;
+
+// Retroceso: qué hacer cuando vuelva a ver la línea
+const int     RETRO_SEGUIR = 0, RETRO_VEE = 1, RETRO_BUSQ = 2;
+bool          enRetroceso   = false;
+int           accionRetro   = RETRO_SEGUIR;
+int           ladoRetro     = 0;
+unsigned long inicioRetroMs = 0;
+unsigned long finRetroMs    = 0;   // cuándo terminó el último retroceso
+
+//------------- TELEMETRÍA DE MOTORES -------------
+int  telVelA = 0;   // rueda DERECHA
+int  telVelB = 0;   // rueda IZQUIERDA
+char telModo[6] = "----";
+
+void setTelemetria(const char* modo) {
+#if DEBUG
+  strncpy(telModo, modo, 5);
+  telModo[5] = '\0';
+#endif
+}
+
+// Toda linea del log empieza con "sens=XXXXXX". La linea queda abierta
+// (sin salto) para que los eventos se peguen al final de ella.
+bool lineaAbierta = false;
+
+void cerrarLinea() {
+#if DEBUG
+  if (lineaAbierta) SerialBT.print("\r\n");
+  lineaAbierta = false;
+#endif
+}
+
+void logEvento(const char* fmt, ...) {
+#if DEBUG
+  char msg[160];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(msg, sizeof(msg), fmt, args);
+  va_end(args);
+
+  // quita el salto de linea final del mensaje
+  int n = strlen(msg);
+  while (n > 0 && (msg[n - 1] == '\n' || msg[n - 1] == '\r')) msg[--n] = '\0';
+
+  char linea[200];
+  if (lineaAbierta) {
+    snprintf(linea, sizeof(linea), " | %s", msg);
+  } else {
+    char sens[NUM_SENSORES + 1];
+    for (int i = 0; i < NUM_SENSORES; i++) sens[i] = b[i] ? '1' : '0';
+    sens[NUM_SENSORES] = '\0';
+    snprintf(linea, sizeof(linea), "sens=%s | %s", sens, msg);
+    lineaAbierta = true;
+  }
+  SerialBT.print(linea);
+#endif
+}
+
+//=====================================================================
+void setup() {
+  for (int i = 0; i < NUM_SENSORES; i++) {
+    pinMode(PINES_SENSORES[i], INPUT);
+    bAnterior[i] = false;
+  }
+  pinMode(ENA, OUTPUT); pinMode(ENB, OUTPUT);
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+  ultimaDeteccionMs = millis();
+#if DEBUG
+  SerialBT.begin("SeguidorV88");
+  logEvento("=== SEGUIDOR DE LINEA - v8.8 (V cerradas) ===");  cerrarLinea();
+  logEvento("Log: IZQ/DER = PWM ordenado a cada rueda (+adelante -atras)"); cerrarLinea();
+  logEvento("Modos: PROP PIVO BUSQ GUIA MEM CENT CRUZ VEE RETR");  cerrarLinea();
+  // Motivo del último reinicio: BROWNOUT = bajó el voltaje (motores/batería)
+  const char* motivoReset;
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  motivoReset = "ENCENDIDO"; break;
+    case ESP_RST_BROWNOUT: motivoReset = "BROWNOUT (bajo voltaje!)"; break;
+    case ESP_RST_PANIC:    motivoReset = "PANIC (error de programa)"; break;
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:      motivoReset = "WATCHDOG"; break;
+    case ESP_RST_SW:       motivoReset = "SOFTWARE"; break;
+    case ESP_RST_EXT:      motivoReset = "BOTON RESET"; break;
+    default:               motivoReset = "OTRO"; break;
+  }
+  logEvento("REINICIO: %s", motivoReset);  cerrarLinea();
+#endif
+}
+
+//=====================================================================
+// TRAYECTORIA
+//=====================================================================
+void registrarError(float e) {
+  historial[histIdx] = e;
+  histIdx = (histIdx + 1) % HIST;
+  if (histLlenas < HIST) histLlenas++;
+
+  if (histLlenas == HIST) {
+    float masVieja = historial[histIdx];
+    float velCruda = (e - masVieja) / (HIST - 1);
+    velocidadError = 0.7f * velocidadError + 0.3f * velCruda;
+    velocidadError = constrain(velocidadError, -VEL_MAX, VEL_MAX);
+  }
+}
+
+void resetTrayectoria() {
+  histLlenas     = 0;
+  histIdx        = 0;
+  velocidadError = 0;
+}
+
+float errorPredicho() {
+  return constrain(ultimoError + velocidadError, -5.0f, 5.0f);
+}
+
+//=====================================================================
+// SOSPECHA DE V: lado ABSOLUTO (v8.8), respecto al centro del robot.
+//=====================================================================
+void registrarSospechaV(float posMarca) {
+  ladoSospechaV = (posMarca >= 0) ? +1 : -1;
+  tSospechaV    = millis();
+}
+
+bool sospechaVigente() {
+  return (ladoSospechaV != 0) && (millis() - tSospechaV < T_SOSPECHA_V_MS);
+}
+
+//=====================================================================
+// Agrupa sensores contiguos con FILTRO DE ANCHO.
+//=====================================================================
+int detectarGrupos(float centroide[3], bool &anchoDetectado,
+                   float &centroideAncho) {
+  int cantGrupos = 0;
+  anchoDetectado = false;
+  centroideAncho = 0;
+  int i = 0;
+  while (i < NUM_SENSORES) {
+    if (b[i]) {
+      float suma = 0;
+      int   cant = 0;
+      while (i < NUM_SENSORES && b[i]) {
+        suma += PESOS[i];
+        cant++;
+        i++;
+      }
+      // v8.8b: la linea de esta pista enciende hasta 3 sensores, asi que
+      // 3 se trata como linea normal. Banda ancha (cruce/V) = 4 o mas.
+      if (cant <= 3) {
+        if (cantGrupos < 3) centroide[cantGrupos++] = suma / cant;
+      } else {
+        anchoDetectado = true;
+        centroideAncho = suma / cant;
+      }
+    } else {
+      i++;
+    }
+  }
+  return cantGrupos;
+}
+
+//=====================================================================
+// Selección de grupo (v8.8)
+//   A) Hay algo cerca de la predicción -> es la propia. Si al mismo
+//      tiempo hay otra marca, ESA se va confirmando como paralela.
+//   B) No hay nada cerca de la predicción:
+//      B1) la marca coincide con la paralela conocida y reciente
+//          -> guiado por faro (comportamiento v8.6).
+//      B2) si no -> la propia se acabó y apareció una rama nueva:
+//          es una V. Se pide el modo VEE.
+//=====================================================================
+float calcularError(float centroide[3], int cantGrupos) {
+  if (cantGrupos == 0) return ultimoError;
+
+  // ================= MODO GUIADO YA ACTIVO =================
+  if (guiadoActivo) {
+    int   gPar = -1;
+    float dPar = 1e9;
+    for (int g = 0; g < cantGrupos; g++) {
+      float dq = fabs(centroide[g] - paralelaPos);
+      if (dq < dPar) { dPar = dq; gPar = g; }
+    }
+    bool ramaVisible = (gPar >= 0 && dPar <= TOL_TRACK_PARALELA);
+
+    for (int g = 0; g < cantGrupos; g++) {
+      if (ramaVisible && g == gPar) continue;
+      bool distinto = !ramaVisible ||
+                      fabs(centroide[g] - paralelaPos) > TOL_TRACK_PARALELA;
+      bool ladoOk   = (centroide[g] - paralelaPos) * dirGuiado > 0;
+      if (distinto && ladoOk) {
+        guiadoActivo   = false;
+        muestrasGuiado = 0;
+        resetTrayectoria();
+#if DEBUG
+        logEvento("PROPIA REENCONTRADA en %.2f\r\n", centroide[g]);
+#endif
+        return centroide[g];
+      }
+    }
+
+    if (ramaVisible && muestrasGuiado < MAX_GUIADO_PARALELA) {
+      muestrasGuiado++;
+      paralelaPos = (1.0f - ALFA_RASTREO) * paralelaPos
+                  + ALFA_RASTREO * centroide[gPar];
+      setTelemetria("GUIA");
+      return 5.0f * dirGuiado;
+    }
+
+    // Se rinde: olvidar la paralela para poder re-evaluar sin prejuicio.
+    guiadoActivo     = false;
+    muestrasGuiado   = 0;
+    paralelaConocida = false;
+    contJuntas       = 0;
+#if DEBUG
+    logEvento("GUIADO RENDIDO -> olvida paralela\r\n");
+#endif
+  }
+
+  float pred      = errorPredicho();
+  int   iMejor    = 0;
+  float mejorDist = fabs(centroide[0] - pred);
+  for (int g = 1; g < cantGrupos; g++) {
+    float dist = fabs(centroide[g] - pred);
+    if (dist < mejorDist) { mejorDist = dist; iMejor = g; }
+  }
+  float mejor = centroide[iMejor];
+
+  // ================= A) SE VE LA PROPIA =================
+  if (mejorDist <= UMBRAL_SALTO) {
+    // ¿La otra marca se fundió con la propia? -> vértice de V, no paralela
+    if (cantGrupos == 1 && contJuntas > 0 &&
+        millis() - tParalelaVista < T_FUSION_MS &&
+        fabs(mejor - paralelaPosVista) < fabs(ultimoError - paralelaPosVista)) {
+      ladoVertice      = (paralelaPosVista >= ultimoError) ? +1 : -1;
+      tVertice         = millis();
+      paralelaConocida = false;
+      contJuntas       = 0;
+#if DEBUG
+      logEvento("VERTICE V (fusion) marca=%.2f propia=%.2f lado=%+d",
+                paralelaPosVista, mejor, ladoVertice);
+#endif
+    }
+
+    // ¿Hay otra marca al mismo tiempo? Esa sí es la rama paralela.
+    for (int g = 0; g < cantGrupos; g++) {
+      if (g == iMejor) continue;
+      if (fabs(centroide[g] - pred) <= UMBRAL_SALTO) continue;
+      if (contJuntas > 0 &&
+          fabs(centroide[g] - paralelaPosVista) <= TOL_TRACK_PARALELA)
+        contJuntas++;
+      else
+        contJuntas = 1;
+      paralelaPosVista = centroide[g];
+      tParalelaVista   = millis();
+      if (contJuntas >= N_CONFIRMA_JUNTAS && !paralelaConocida) {
+        paralelaConocida = true;
+#if DEBUG
+        logEvento("PARALELA CONFIRMADA en %.2f (propia=%.2f)\r\n",
+                      paralelaPosVista, mejor);
+#endif
+      }
+    }
+    candidatoActivo   = false;
+    contadorCandidato = 0;
+    confirmGuiado     = 0;
+    return mejor;
+  }
+
+  // ============ B) NADA CERCA DE LA PREDICCIÓN ============
+  // La propia no se ve pero NO se fue por el borde: estaba centrada
+  // (e=±1) o en ±3 con la marca del otro lado. Cayó en un hueco entre
+  // sensores; no se acabó. La marca lateral es la otra rama de la V que
+  // se acerca: se rastrea (para detectar la fusión en el vértice) y se
+  // mantiene el rumbo. Ni VEE prematuro ni guiado por "paralela".
+  bool propiaEnHueco = fabs(mejor) >= 3.0f &&
+                       (fabs(ultimoError) <= 1.0f ||
+                        (fabs(ultimoError) <= 3.0f && mejor * ultimoError < 0));
+  if (propiaEnHueco) {
+    if (contJuntas > 0 &&
+        fabs(mejor - paralelaPosVista) <= TOL_TRACK_PARALELA)
+      contJuntas++;
+    else
+      contJuntas = 1;
+    paralelaPosVista = mejor;
+    tParalelaVista   = millis();
+    registrarSospechaV(mejor);
+    candidatoActivo   = false;
+    contadorCandidato = 0;
+    return (fabs(ultimoError) <= 1.0f) ? 0 : ultimoError;
+  }
+
+  // Solo es "la paralela" si la propia se perdió por el BORDE (el carro se
+  // desvió). Si se perdió por dentro, la marca es la rama de una V.
+  bool esParalela = fabs(ultimoError) >= UMBRAL_BORDE &&
+                    paralelaConocida &&
+                    (millis() - tParalelaVista < T_PARALELA_VIGENTE_MS) &&
+                    (fabs(mejor - paralelaPosVista) <= TOL_TRACK_PARALELA);
+
+  if (!esParalela) {
+    // B2) v8.8: la línea propia se acabó y hay una marca nueva.
+    // Eso es el vértice de una V, no una rama paralela.
+    if (candidatoActivo && fabs(mejor - valorCandidato) <= TOL_CANDIDATO)
+      contadorCandidato++;
+    else
+      contadorCandidato = 1;
+    candidatoActivo = true;
+    valorCandidato  = mejor;
+
+    if (contadorCandidato >= N_MUESTRAS_VEE_GRUPO) {
+      candidatoActivo   = false;
+      contadorCandidato = 0;
+      pedirVee = true;
+      ladoVee  = (mejor >= 0) ? +1 : -1;
+      registrarSospechaV(mejor);
+#if DEBUG
+      logEvento("VEE POR FIN DE LINEA marca=%.2f pred=%.2f lado=%+d\r\n",
+                    mejor, pred, ladoVee);
+#endif
+    }
+    return ultimoError;   // mientras confirma (9 ms) mantiene rumbo
+  }
+
+  // ============ B1) ES LA PARALELA CONOCIDA: FARO ============
+  registrarSospechaV(mejor);
+  if (confirmGuiado > 0 && fabs(mejor - posConfirm) <= TOL_TRACK_PARALELA) {
+    confirmGuiado++;
+    posConfirm = mejor;
+    if (confirmGuiado >= N_CONFIRMACION_GUIADO) {
+      guiadoActivo    = true;
+      muestrasGuiado  = 1;
+      candidatoActivo = false;
+      confirmGuiado   = 0;
+      paralelaPos     = mejor;
+      dirGuiado       = (pred >= mejor) ? +1.0f : -1.0f;
+#if DEBUG
+      logEvento("GUIADO POR PARALELA c=%.2f pred=%.2f dir=%.0f\r\n",
+                    mejor, pred, dirGuiado);
+#endif
+      return 5.0f * dirGuiado;
+    }
+  } else {
+    confirmGuiado = 1;
+    posConfirm    = mejor;
+  }
+  return ultimoError;
+}
+
+//=====================================================================
+// Motor A = rueda DERECHA, motor B = rueda IZQUIERDA
+//=====================================================================
+// Rampa: cada llamada (cada 3 ms) el PWM cambia como máximo RAMPA_PWM.
+// Evita el pico de corriente al invertir un motor de golpe, que hace
+// caer el voltaje y reinicia el ESP32 (brownout).
+// Además, un motor NUNCA se invierte de golpe: primero baja hasta 0,
+// espera PAUSA_INVERSION ciclos (que deje de girar) y recién entonces
+// arranca en sentido contrario. Invertir un motor que aún gira pide
+// casi el doble de la corriente de arranque.
+int pausaA = 0, pausaB = 0;
+
+int rampa(int actual, int objetivo, int &pausa) {
+  if (pausa > 0) { pausa--; return 0; }
+  bool invierte = (actual > 0 && objetivo < 0) || (actual < 0 && objetivo > 0);
+  if (invierte) objetivo = 0;                      // primero frenar
+  int nuevo;
+  if (abs(objetivo) <= abs(actual))
+    nuevo = objetivo;   // bajar velocidad no pide corriente: inmediato
+  else
+    nuevo = actual + constrain(objetivo - actual, -RAMPA_PWM, RAMPA_PWM);
+  if (invierte && nuevo == 0) pausa = PAUSA_INVERSION;
+  return nuevo;
+}
+
+void setMotorA(int vel) {
+  vel = constrain(vel, -MAX_SPEED, MAX_SPEED);
+  vel = rampa(telVelA, vel, pausaA);
+  telVelA = vel;
+  analogWrite(ENA, abs(vel));
+  if (vel >= 0) { digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);  }
+  else          { digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH); }
+}
+
+void setMotorB(int vel) {
+  vel = constrain(vel, -MAX_SPEED, MAX_SPEED);
+  vel = rampa(telVelB, vel, pausaB);
+  telVelB = vel;
+  analogWrite(ENB, abs(vel));
+  if (vel >= 0) { digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH); }
+  else          { digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);  }
+}
+
+// lado > 0 = girar hacia la IZQUIERDA (línea con error positivo)
+// Con GIRO_SIN_REVERSA la rueda de adentro queda QUIETA (0) y solo empuja
+// la de afuera: el carro gira sobre la rueda detenida. Ninguna rueda va
+// en reversa -> no hay inversión de giro y trabaja un solo motor.
+void pivotarHacia(int lado, int velocidad) {
+  if (GIRO_SIN_REVERSA) {
+    int afuera = min((int)(velocidad * FACTOR_UNA_RUEDA), MAX_SPEED);
+    if (lado > 0) { setMotorA(afuera); setMotorB(0); }
+    else          { setMotorA(0);      setMotorB(afuera); }
+    return;
+  }
+  if (lado > 0) { setMotorA(velocidad);  setMotorB(-velocidad); }
+  else          { setMotorA(-velocidad); setMotorB(velocidad);  }
+}
+
+void aplicarControl(float error) {
+  if (error < -UMBRAL_PIVOTE) {
+    setTelemetria("PIVO");
+    setMotorA(GIRO_REVERSA); setMotorB(GIRO_RAPIDO);
+  } else if (error > UMBRAL_PIVOTE) {
+    setTelemetria("PIVO");
+    setMotorA(GIRO_RAPIDO);  setMotorB(GIRO_REVERSA);
+  } else {
+    float excesoError = fabs(error) - 1.0f;
+    if (excesoError < 0) excesoError = 0;
+    int velBase = BASE_SPEED
+                - (int)(FRENO_ERROR * excesoError)
+                - (int)(FRENO_VEL   * fabs(velocidadError));
+    if (velBase < VEL_MINIMA_CURVA) velBase = VEL_MINIMA_CURVA;
+
+    // Se ve (o se vio hace poco) otra marca junto a la propia: puede ser
+    // la otra rama de una V que se acerca -> llegar despacio al vértice.
+    if (millis() - tParalelaVista < T_APROX_V_MS)
+      velBase = min(velBase, VEL_APROX_V);
+
+    int correccion = (int)(Kp * error + Kd * velocidadError);
+
+    int velA = velBase + correccion;
+    int velB = velBase - correccion;
+    if (GIRO_SIN_REVERSA) { velA = max(velA, 0); velB = max(velB, 0); }
+
+    setTelemetria("PROP");
+    setMotorA(velA);
+    setMotorB(velB);
+  }
+}
+
+//=====================================================================
+// BÚSQUEDA
+//=====================================================================
+void iniciarBusqueda() {
+  if (!enBusqueda) {
+    enBusqueda       = true;
+    inicioBusquedaMs = millis();
+    if (sospechaVigente()) {
+      ladoSalida = ladoSospechaV;
+#if DEBUG
+      logEvento("BUSQUEDA por sospecha V lado=%+d\r\n", ladoSalida);
+#endif
+    } else {
+      ladoSalida = (ultimoError >= 0) ? +1 : -1;
+    }
+    resetTrayectoria();
+  }
+  setTelemetria("BUSQ");
+  pivotarHacia(ladoSalida, SPEED_BUSQUEDA);
+}
+
+bool grupoValidoEnBusqueda(float centroide[3], int cantGrupos, float &errorOut) {
+  bool libre = (millis() - inicioBusquedaMs) > T_BUSQUEDA_LIBRE_MS;
+  float mejor      = 0;
+  bool  encontrado = false;
+  float mejorDist  = 1e9;
+
+  for (int g = 0; g < cantGrupos; g++) {
+    bool ladoOk = libre || (centroide[g] * ladoSalida > -1.0f);
+    if (!ladoOk) continue;
+    // No reenganchar con la línea en el borde (±5): se seguiría girando a
+    // PIVO fuerte y se pasaría. Esperar a que el giro la traiga más al centro.
+    if (fabs(centroide[g]) > TOL_REENGANCHE_VEE) continue;
+    float dist = fabs(centroide[g] - ladoSalida * 5.0f);
+    if (dist < mejorDist) {
+      mejorDist  = dist;
+      mejor      = centroide[g];
+      encontrado = true;
+    }
+  }
+  if (encontrado) errorOut = mejor;
+  return encontrado;
+}
+
+//=====================================================================
+// Entrar al modo VEE (pivote sobre el eje hacia la rama de la V)
+//=====================================================================
+void entrarVee(int lado, const char* motivo) {
+  enVee            = true;
+  ladoVee          = lado;
+  inicioVeeMs      = millis();
+  guiadoActivo     = false;
+  muestrasGuiado   = 0;
+  confirmGuiado    = 0;
+  candidatoActivo  = false;
+  enCruz           = false;
+  contadorVee      = 0;
+  resetTrayectoria();
+  ultimoError = 5.0f * lado;
+  registrarSospechaV(ultimoError);
+  setTelemetria("VEE");
+  pivotarHacia(lado, SPEED_VEE);
+  ultimaDeteccionMs = millis();
+  muestrasSinLinea  = 0;
+#if DEBUG
+  logEvento("ENTRA VEE (%s) lado=%+d\r\n", motivo, lado);
+#else
+  (void)motivo;
+#endif
+}
+
+//=====================================================================
+// RETROCESO: reversa derecho hasta volver a ver la línea; luego la
+// acción pendiente (VEE hacia un lado, búsqueda, o seguir normal).
+//=====================================================================
+void entrarRetroceso(int accion, int lado, const char* motivo) {
+  bool repetido = accion == RETRO_SEGUIR && finRetroMs != 0 &&
+                  millis() - finRetroMs < T_REPITE_RETRO_MS;
+  if (repetido) accion = RETRO_BUSQ;   // ya retrocedió aquí y se volvió a salir
+  enRetroceso     = true;
+  accionRetro     = accion;
+  ladoRetro       = lado;
+  inicioRetroMs   = millis();
+  enBusqueda      = false;
+  enVee           = false;
+  guiadoActivo    = false;
+  candidatoActivo = false;
+  resetTrayectoria();
+  setTelemetria("RETR");
+  setMotorA(-VEL_RETROCESO);
+  setMotorB(-VEL_RETROCESO);
+#if DEBUG
+  logEvento("RETROCEDE (%s%s)", motivo, repetido ? ", repetido -> buscar" : "");
+#else
+  (void)motivo;
+#endif
+}
+
+void terminarRetroceso(const char* motivo) {
+  enRetroceso       = false;
+  finRetroMs        = millis();
+  ultimaDeteccionMs = millis();
+  muestrasSinLinea  = 0;
+#if DEBUG
+  logEvento("%s -> %s", motivo,
+            accionRetro == RETRO_VEE  ? "VEE" :
+            accionRetro == RETRO_BUSQ ? "BUSQ" : "SEGUIR");
+#else
+  (void)motivo;
+#endif
+  if (accionRetro == RETRO_VEE) {
+    entrarVee(ladoRetro, "tras retroceso");
+  } else if (accionRetro == RETRO_BUSQ) {
+    registrarSospechaV(ladoRetro);   // fija el lado de la búsqueda
+    iniciarBusqueda();
+  }
+}
+
+//=====================================================================
+#if DEBUG
+void logEstado(float error, int cantGrupos) {
+  static unsigned long tLog = 0;
+  if (millis() - tLog < 50) return;
+  tLog = millis();
+
+  int pwmIzq = telVelB;   // motor B = rueda izquierda
+  int pwmDer = telVelA;   // motor A = rueda derecha
+
+  // Arma la linea completa en un buffer y la envia de una sola vez
+  char sens[NUM_SENSORES + 1];
+  for (int i = 0; i < NUM_SENSORES; i++) sens[i] = b[i] ? '1' : '0';
+  sens[NUM_SENSORES] = '\0';
+
+  const char* dir = (pwmIzq > pwmDer) ? "->DER" : (pwmDer > pwmIzq) ? "->IZQ" : "recto";
+
+  // Cierra la linea anterior (con sus eventos) y abre la nueva sin salto,
+  // para que los eventos que ocurran despues se peguen al final
+  cerrarLinea();
+
+  char linea[200];
+  snprintf(linea, sizeof(linea),
+           "sens=%s e=%.2f v=%.3f pred=%.2f grupos=%d cand=%d(%d) par=%d"
+           " | modo=%s IZQ=%+d DER=%+d %s",
+           sens, error, velocidadError, errorPredicho(),
+           cantGrupos, candidatoActivo, contadorCandidato, paralelaConocida,
+           telModo, pwmIzq, pwmDer, dir);
+  SerialBT.print(linea);
+  lineaAbierta = true;
+}
+#endif
+
+//=====================================================================
+void loop() {
+  unsigned long ahora = micros();
+  if (ahora - ultimaMuestraUs < PERIODO_US) return;
+  ultimaMuestraUs = ahora;
+
+  // ---- Lectura + debounce ----
+  bool algunoActivo = false;
+  for (int i = 0; i < NUM_SENSORES; i++) {
+    bool lectura = (digitalRead(PINES_SENSORES[i]) == HIGH);
+    b[i]         = lectura && bAnterior[i];
+    bAnterior[i] = lectura;
+    if (b[i]) algunoActivo = true;
+  }
+
+  float centroide[3];
+  bool  anchoDetectado = false;
+  float centroideAncho = 0;
+  int   cantGrupos = algunoActivo
+                   ? detectarGrupos(centroide, anchoDetectado, centroideAncho)
+                   : 0;
+
+  // ================= RETROCESO =================
+  if (enRetroceso) {
+    if (cantGrupos > 0 || anchoDetectado) {
+      // Volvió a ver la línea: tomar la marca más centrada
+      if (cantGrupos > 0) {
+        float c = centroide[0];
+        for (int g = 1; g < cantGrupos; g++)
+          if (fabs(centroide[g]) < fabs(c)) c = centroide[g];
+        ultimoError = c;
+      }
+      resetTrayectoria();
+      registrarError(ultimoError);
+      terminarRetroceso("LINEA ENCONTRADA retrocediendo");
+      if (!enVee && !enBusqueda) aplicarControl(ultimoError);
+    } else if (millis() - inicioRetroMs > T_RETRO_MAX_MS) {
+      if (accionRetro == RETRO_SEGUIR) {
+        accionRetro = RETRO_BUSQ;
+        ladoRetro   = (ultimoError >= 0) ? +1 : -1;
+      }
+      terminarRetroceso("RETROCESO SIN LINEA");
+    } else {
+      setTelemetria("RETR");
+      setMotorA(-VEL_RETROCESO);
+      setMotorB(-VEL_RETROCESO);
+    }
+#if DEBUG
+    logEstado(ultimoError, cantGrupos);
+#endif
+    return;
+  }
+
+  // ================= BANDA ANCHA: CRUZ o VEE =================
+  if (cantGrupos == 0 && anchoDetectado && !enBusqueda && !enVee) {
+
+    // Banda descentrada persistente -> rama de V en ángulo cerrado
+    if (fabs(centroideAncho) > UMBRAL_CENTRO_CRUZ) contadorVee++;
+    else                                          contadorVee = 0;
+
+    if (contadorVee >= N_MUESTRAS_VEE) {
+      entrarVee((centroideAncho >= 0) ? +1 : -1, "banda ancha");
+#if DEBUG
+      logEstado(ultimoError, 0);
+#endif
+      return;
+    }
+
+    // Banda centrada: cruce perpendicular -> mantener rumbo
+    if (!enCruz) {
+      enCruz       = true;
+      inicioCruzMs = millis();
+    }
+    if (millis() - inicioCruzMs <= T_CRUZ_MAX_MS) {
+      float eCruz = constrain(ultimoError, -2.0f, 2.0f);
+      aplicarControl(eCruz);
+      setTelemetria("CRUZ");
+      ultimaDeteccionMs = millis();
+      muestrasSinLinea  = 0;
+#if DEBUG
+      logEstado(eCruz, 0);
+#endif
+      return;
+    }
+    enCruz = false;
+#if DEBUG
+    logEvento("CRUZ TIMEOUT -> busqueda\r\n");
+#endif
+    iniciarBusqueda();
+    return;
+  }
+  if (!enVee) { enCruz = false; contadorVee = 0; }
+
+  // ================= MODO VEE (v8.8) =================
+  // Pivote sobre el eje hacia la rama de salida hasta centrarla.
+  if (enVee) {
+    unsigned long tVee = millis() - inicioVeeMs;
+
+    float eRe   = 0;
+    bool  hayRe = false;
+    float mejorAbs = 1e9;
+    for (int g = 0; g < cantGrupos; g++) {
+      // Solo la rama NUEVA, que entra por el lado del giro (+1 o más hacia
+      // ese lado). La línea vieja queda en el centro o se va al otro lado.
+      if (centroide[g] * ladoVee < 1.0f) continue;
+      if (fabs(centroide[g]) > TOL_REENGANCHE_VEE) continue; // aún muy lateral
+      if (fabs(centroide[g]) < mejorAbs) {
+        mejorAbs = fabs(centroide[g]);
+        eRe      = centroide[g];
+        hayRe    = true;
+      }
+    }
+
+    if (hayRe && tVee >= T_VEE_MIN_MS) {
+      enVee         = false;
+      ladoSospechaV = 0;
+      ultimoError   = eRe;
+      resetTrayectoria();
+      registrarError(eRe);
+      velocidadError = -AMORT_REENGANCHE * ladoVee;   // frena el giro
+      ultimaDeteccionMs = millis();
+      muestrasSinLinea  = 0;
+      aplicarControl(eRe);
+#if DEBUG
+      logEvento("REENGANCHE VEE e=%.2f tras %lu ms | IZQ=%+d DER=%+d\r\n",
+                    eRe, tVee, telVelB, telVelA);
+#endif
+      return;
+    }
+
+    if (tVee > T_VEE_MAX_MS) {
+      enVee = false;
+#if DEBUG
+      logEvento("VEE TIMEOUT\r\n");
+#endif
+      entrarRetroceso(RETRO_BUSQ, ladoVee, "V sin rama");
+      return;
+    }
+
+    setTelemetria("VEE");
+    pivotarHacia(ladoVee, SPEED_VEE);
+    ultimaDeteccionMs = millis();
+    muestrasSinLinea  = 0;
+#if DEBUG
+    logEstado(5.0f * ladoVee, cantGrupos);
+#endif
+    return;
+  }
+
+  // ================= MODO BÚSQUEDA =================
+  if (enBusqueda) {
+    float e;
+    if (cantGrupos > 0 && grupoValidoEnBusqueda(centroide, cantGrupos, e)) {
+      enBusqueda      = false;
+      candidatoActivo = false;
+      guiadoActivo    = false;
+      muestrasGuiado  = 0;
+      confirmGuiado   = 0;
+      ladoSospechaV   = 0;
+      ultimoError     = e;
+      resetTrayectoria();
+      registrarError(e);
+      velocidadError  = -AMORT_REENGANCHE * ladoSalida;   // frena el giro
+      ultimaDeteccionMs = millis();
+      muestrasSinLinea  = 0;
+      aplicarControl(e);
+#if DEBUG
+      logEvento("REENGANCHE e=%.2f lado=%d | modo=%s IZQ=%+d DER=%+d\r\n",
+                    e, ladoSalida, telModo, telVelB, telVelA);
+#endif
+    } else {
+      iniciarBusqueda();
+#if DEBUG
+      logEstado(ultimoError, cantGrupos);
+#endif
+    }
+    return;
+  }
+
+  // ================= PÉRDIDA DE LÍNEA =================
+  if (cantGrupos == 0) {
+    candidatoActivo   = false;
+    contadorCandidato = 0;
+    muestrasSinLinea++;
+
+    if (guiadoActivo && muestrasGuiado < MAX_GUIADO_PARALELA) {
+      muestrasGuiado++;
+      aplicarControl(5.0f * dirGuiado);
+#if DEBUG
+      logEstado(5.0f * dirGuiado, 0);
+#endif
+      return;
+    }
+    guiadoActivo = false;
+
+    // Se pasó por un vértice hace poco: retroceder hasta volver a ver la
+    // línea (quedar sobre el vértice) y desde ahí girar hacia la rama.
+    if (ladoVertice != 0 && millis() - tVertice < T_VERTICE_MS) {
+      int lado = ladoVertice;
+      ladoVertice = 0;
+      entrarRetroceso(RETRO_VEE, lado, "perdida tras vertice");
+#if DEBUG
+      logEstado(ultimoError, 0);
+#endif
+      return;
+    }
+
+    // Sospecha de V reciente: igual, retroceder y girar hacia la rama.
+    if (sospechaVigente()) {
+      int lado = ladoSospechaV;
+      entrarRetroceso(RETRO_VEE, lado, "perdida con sospecha V");
+#if DEBUG
+      logEstado(ultimoError, 0);
+#endif
+      return;
+    }
+
+    bool saliendoRapido = fabs(velocidadError) > VEL_SALIDA &&
+                          (velocidadError * ultimoError) > 0;
+
+    // Línea en el hueco central: va bien, seguir derecho sin buscar.
+    if (fabs(ultimoError) <= 1.0f && !saliendoRapido &&
+        millis() - ultimaDeteccionMs < T_CENTRO_MS) {
+      aplicarControl(0);
+      setTelemetria("CENT");
+#if DEBUG
+      logEstado(0, 0);
+#endif
+      return;
+    }
+
+    if (fabs(ultimoError) >= UMBRAL_BORDE || saliendoRapido) {
+#if DEBUG
+      logEvento("BORDE e=%.2f v=%.3f\r\n", ultimoError, velocidadError);
+#endif
+      entrarRetroceso(RETRO_SEGUIR, (ultimoError >= 0) ? +1 : -1, "se salio por el borde");
+    } else if (millis() - ultimaDeteccionMs < T_MEMORIA_MS) {
+      float extra = constrain(velocidadError * muestrasSinLinea,
+                              -EXTRAPOLACION_MAX, EXTRAPOLACION_MAX);
+      float eMem = constrain(ultimoError + extra, -5.0f, 5.0f);
+      aplicarControl(eMem);
+      setTelemetria("MEM");
+#if DEBUG
+      logEstado(eMem, 0);
+#endif
+    } else {
+#if DEBUG
+      logEvento("TIMEOUT e=%.2f\r\n", ultimoError);
+#endif
+      entrarRetroceso(RETRO_SEGUIR, (ultimoError >= 0) ? +1 : -1, "linea perdida");
+    }
+    return;
+  }
+
+  // ================= SEGUIMIENTO NORMAL =================
+  muestrasSinLinea  = 0;
+  ultimaDeteccionMs = millis();
+
+  float error = calcularError(centroide, cantGrupos);
+
+  // v8.8: calcularError puede haber confirmado una V
+  if (pedirVee) {
+    pedirVee = false;
+    entrarVee(ladoVee, "fin de linea propia");
+#if DEBUG
+    logEstado(ultimoError, cantGrupos);
+#endif
+    return;
+  }
+
+  ultimoError = error;
+  registrarError(error);
+  aplicarControl(error);
+
+#if DEBUG
+  logEstado(error, cantGrupos);
+#endif
+}

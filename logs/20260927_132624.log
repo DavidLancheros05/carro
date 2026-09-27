@@ -1,0 +1,138 @@
+﻿
+[CONECTADO 13:26:27]
+
+> ?
+Comandos:
+  ver           muestra los parametros
+  <param> <n>   cambia un parametro. Ej: aprox 70 | modo 2
+  guardar       guarda (se mantiene al apagar)
+  fabrica       vuelve a los valores del codigo
+  go            arranca en 3 s
+  stop / x      detiene ya
+Modos: 0 carrera, 1 velocidad, 2 frenado, 3 giro, 4 sensores, 5 calibrar
+
+> ver
+--- parametros (detenido) ---
+  modo        5
+  auto        0
+  log         1
+  base        110
+  velmin      85
+  aprox       80
+  girorap     170
+  girorev     -60
+  velgiro     105
+  kp          20.00
+  kd          150.00
+  frenoe      12.00
+  frenov      80.00
+  distprop    3.00
+  evidv       3.00
+  evidaprox   1.00
+  nfinv       2
+  thueco      150
+  tsolomarca  150
+  nblanco     5
+  reeng       1.00
+  t180        0
+  prectams    2000
+  prectapwm   115
+  lado        1
+
+> modo 5
+  modo        5
+  (activo ya; 'guardar' para que quede al apagar)
+
+> go
+Arranca en 3 s, modo 5...
+ARRANCA (modo 5)
+T_180 = 513 ms
+T_180 = 417 ms
+T_180 = 492 ms
+T_180 = 421 ms
+T_180 = 159 ms
+T_180 = 333 ms
+T_180 = 411 ms
+T_180 = 165 ms
+T_180 = 336 ms
+T_180 = 414 ms
+T_180 = 168 ms
+T_180 = 330 ms
+T_180 = 417 ms
+T_180 = 168 ms
+T_180 = 330 ms
+T_180 = 426 ms
+T_180 = 177 ms
+T_180 = 318 ms
+T_180 = 426 ms
+T_180 = 180 ms
+T_180 = 306 ms
+T_180 = 432 ms
+T_180 = 189 ms
+T_180 = 271 ms
+T_180 = 339 ms
+T_180 = 231 ms
+
+> x
+DETENIDO: comando stop
+
+> ?
+Comandos:
+  ver           muestra los parametros
+  <param> <n>   cambia un parametro. Ej: aprox 70 | modo 2
+  guardar       guarda (se mantiene al apagar)
+  fabrica       vuelve a los valores del codigo
+  go            arranca en 3 s
+  stop / x      detiene ya
+Modos: 0 carrera, 1 velocidad, 2 frenado, 3 giro, 4 sensores, 5 calibrar
+
+> go
+Arranca en 3 s, modo 5...
+ARRANCA (modo 5)
+T_180 = 627 ms
+T_180 = 423 ms
+T_180 = 477 ms
+T_180 = 411 ms
+T_180 = 471 ms
+T_180 = 402 ms
+T_180 = 483 ms
+T_180 = 394 ms
+T_180 = 477 ms
+T_180 = 402 ms
+T_180 = 486 ms
+T_180 = 387 ms
+T_180 = 489 ms
+T_180 = 393 ms
+T_180 = 489 ms
+T_180 = 381 ms
+T_180 = 495 ms
+T_180 = 393 ms
+T_180 = 489 ms
+T_180 = 381 ms
+T_180 = 499 ms
+T_180 = 384 ms
+T_180 = 498 ms
+T_180 = 381 ms
+T_180 = 504 ms
+T_180 = 399 ms
+T_180 = 681 ms
+T_180 = 633 ms
+T_180 = 531 ms
+T_180 = 705 ms
+T_180 = 663 ms
+T_180 = 319 ms
+T_180 = 600 ms
+T_180 = 258 ms
+T_180 = 372 ms
+T_180 = 279 ms
+T_180 = 246 ms
+T_180 = 351 ms
+T_180 = 321 ms
+T_180 = 231 ms
+T_180 = 321 ms
+T_180 = 354 ms
+T_180 = 228 ms
+T_180 = 318 ms
+
+> x
+DETENIDO: comando stop
