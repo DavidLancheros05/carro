@@ -199,11 +199,18 @@ un poco peor que la real, lo que deja margen.
 **Prueba 5 - Alimentación y calibración del giro**
 1. Poner el carro con el **eje** (no los sensores) sobre una recta de la pista. `modo 5`, `go`.
 2. Gira en el sitio sin parar. Dejarlo 30 s y detenerlo con `x`.
-3. En el log aparece `T_180 = xxx ms` cada media vuelta. Los valores deben ser parecidos entre sí.
+3. En el log aparece una línea por cada media vuelta:
+   `pasada 560 ms | T_180 = 483 ms | promedio 481 (12) -> usar: t180 500`.
+   Las `pasada` pueden alternar largo/corto (el eje no quedó justo sobre la línea); no importa,
+   `T_180` ya promedia cada par. Los `T_180` deben ser parecidos entre sí. Si en cambio se
+   repite un patrón de 3 pasadas distintas, hay otra marca negra dentro del círculo que barren
+   los sensores: mover el carro a una recta más despejada.
 4. Aprobado si no hay ningún `REINICIO: BROWNOUT`. Si aparece, hay que arreglar la alimentación
    (Riesgo 4).
-5. Poner el valor típico con `t180 <valor>` y `guardar`. Eso activa la protección contra
-   devolverse por la rama vieja.
+5. Escribir el valor que aparece en `usar: t180 xxx` (el promedio + 4 % de margen) y `guardar`.
+   Eso activa la protección contra devolverse por la rama vieja. Un `t180` menor que lo medido se
+   rechaza: haría ignorar la rama **nueva**. El promedio se pierde al apagar; para cambiar `t180`
+   después de reiniciar, conviene repetir la prueba.
 
 Qué hacer si alguna falla:
 - **Falla la 2:** bajar `aprox` (por ejemplo `aprox 70`, `go` y medir de nuevo).

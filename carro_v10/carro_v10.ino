@@ -84,8 +84,9 @@
 //       una V, reengancha y sigue la línea.
 //   4 = SENSORES: motores apagados, registra "sens=" cada 50 ms.
 //   5 = CALIBRAR: con el EJE sobre una recta, gira en el sitio y
-//       registra "T_180 = xxx ms". Poner ese valor en "t180".
-//       Hacerlo con la batería como estará en la carrera.
+//       registra "T_180 = xxx ms" y el valor a usar ("usar: t180 xxx").
+//       Hacerlo con la batería como estará en la carrera. Un t180 menor
+//       que lo medido se rechaza: haría ignorar la rama nueva.
 //=====================================================================
 #include "BluetoothSerial.h"
 #include "Preferences.h"
@@ -229,6 +230,10 @@ bool          viejaSaltada    = false;
 
 int           calibBlanco     = 0;   // prueba 5
 unsigned long calibAnterior   = 0;
+unsigned long calibPasada     = 0;   // duración de la pasada anterior
+unsigned long calibSuma       = 0;
+int           calibN          = 0;
+unsigned long calibPromedio   = 0;   // T_180 medido; 0 = sin calibrar (se pierde al apagar)
 
 int velA = 0, velB = 0;              // PWM actual (rueda derecha / izquierda)
 int pausaA = 0, pausaB = 0;
@@ -411,6 +416,8 @@ void iniciarCorrida() {
   ultimaVezPropia = millis();
   calibBlanco     = 0;
   calibAnterior   = 0;
+  calibPasada     = 0;
+  if (MODO_PRUEBA == 5) { calibSuma = 0; calibN = 0; calibPromedio = 0; }
   resetVelocidad();
   responder("ARRANCA (modo %d)", MODO_PRUEBA);
   if (MODO_PRUEBA == 3) empezarGiro(LADO_PRUEBA >= 0 ? +1 : -1, true, "PRUEBA GIRO AISLADO");
@@ -579,7 +586,9 @@ void pruebaSensores() {
 }
 
 // 5: gira en el sitio y mide el tiempo entre dos pasadas por la recta
-// (cada pasada = 180° de giro).
+// (cada pasada = 180° de giro). Si el eje no está justo sobre la línea,
+// las pasadas se alternan largo/corto, pero cada par suma una vuelta: por
+// eso T_180 = promedio de las dos últimas pasadas.
 void calibrar() {
   pivotarHacia(+1, SPEED_GIRO);
 
@@ -589,7 +598,22 @@ void calibrar() {
 
   if (calibBlanco >= 20) {         // la línea vuelve a entrar tras 60 ms de blanco
     unsigned long ms = millis();
-    if (calibAnterior != 0) responder("T_180 = %lu ms", ms - calibAnterior);
+    if (calibAnterior != 0) {
+      unsigned long pasada = ms - calibAnterior;
+      if (calibPasada != 0) {
+        unsigned long t180 = (calibPasada + pasada) / 2;
+        calibSuma += t180;
+        calibN++;
+        calibPromedio = calibSuma / calibN;
+        // Un poco más que lo medido: si la batería baja, gira más lento
+        unsigned long sugerido = ((unsigned long)(calibPromedio * 1.04f) + 5) / 10 * 10;
+        responder("pasada %lu ms | T_180 = %lu ms | promedio %lu (%d) -> usar: t180 %lu",
+                  pasada, t180, calibPromedio, calibN, sugerido);
+      } else {
+        responder("pasada %lu ms", pasada);
+      }
+      calibPasada = pasada;
+    }
     calibAnterior = ms;
   }
   calibBlanco = 0;
@@ -662,6 +686,12 @@ void ayuda() {
 //=====================================================================
 // COMANDOS POR BLUETOOTH
 //=====================================================================
+int buscarParam(const char* nombre) {
+  for (int i = 0; i < NUM_PARAMS; i++)
+    if (!strcasecmp(nombre, params[i].nombre)) return i;
+  return -1;
+}
+
 void ejecutarComando(char* linea) {
   char* cmd = strtok(linea, " \t=");
   if (!cmd) return;
@@ -679,19 +709,41 @@ void ejecutarComando(char* linea) {
   if (!strcasecmp(cmd, "guardar")) { guardarTodo();    return; }
   if (!strcasecmp(cmd, "fabrica")) { volverAFabrica(); return; }
 
-  for (int i = 0; i < NUM_PARAMS; i++) {
-    if (strcasecmp(cmd, params[i].nombre)) continue;
-    if (!arg) { mostrarParam(params[i]); return; }
-    char* fin;
-    float v = strtof(arg, &fin);
-    if (fin == arg) { responder("Valor no valido: %s", arg); return; }
-    if (!strcasecmp(cmd, "modo") && (v < 0 || v > 5)) { responder("modo va de 0 a 5"); return; }
-    escribirParam(params[i], v);
-    mostrarParam(params[i]);
-    responder("  (activo ya; 'guardar' para que quede al apagar)");
-    return;
+  int i = buscarParam(cmd);
+  // "modo5" sin espacio = "modo 5" (sin romper nombres con números como "t180")
+  if (i < 0 && !arg) {
+    char* num = cmd;
+    while (*num && !isdigit((unsigned char)*num) && *num != '-' && *num != '.') num++;
+    if (num != cmd && *num) {
+      char nombre[16];
+      int largo = min((int)(num - cmd), (int)sizeof(nombre) - 1);
+      memcpy(nombre, cmd, largo);
+      nombre[largo] = '\0';
+      i = buscarParam(nombre);
+      if (i >= 0) arg = num;
+    }
   }
-  responder("No entiendo \"%s\". Escribe ? para ver los comandos", cmd);
+  if (i < 0) { responder("No entiendo \"%s\". Escribe ? para ver los comandos", cmd); return; }
+
+  Param &p = params[i];
+  if (!arg) { mostrarParam(p); return; }
+  char* fin;
+  float v = strtof(arg, &fin);
+  if (fin == arg) { responder("Valor no valido: %s", arg); return; }
+  if (!strcasecmp(p.nombre, "modo") && (v < 0 || v > 5)) { responder("modo va de 0 a 5"); return; }
+  if (!strcasecmp(p.nombre, "t180") && v > 0) {
+    // Un t180 menor que el real hace ignorar la rama NUEVA y devolverse
+    if (calibPromedio > 0 && v < calibPromedio) {
+      responder("t180 %.0f es menor que lo medido (%lu ms): ignoraria la rama nueva.", v, calibPromedio);
+      responder("  Usa t180 %lu o mas. No se cambio.", calibPromedio);
+      return;
+    }
+    if (calibPromedio == 0)
+      responder("  OJO: sin calibrar en este encendido. Usar el valor 'usar: t180' de la prueba 5");
+  }
+  escribirParam(p, v);
+  mostrarParam(p);
+  responder("  (activo ya; 'guardar' para que quede al apagar)");
 }
 
 void leerComandos() {
