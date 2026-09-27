@@ -220,6 +220,7 @@ int   histIdx = 0, histLlenas = 0;
 
 float         evidencia       = 0;   // + = hay marcas a la izquierda, - = derecha
 unsigned long ultimaVezPropia = 0;
+bool          lineaVista      = false;   // se vio la línea desde el arranque
 int           muestrasBlanco  = 0;
 
 int           ladoGiro        = 0;   // +1 izquierda, -1 derecha
@@ -416,12 +417,17 @@ void iniciarCorrida() {
   evidencia       = 0;
   muestrasBlanco  = 0;
   ultimaVezPropia = millis();
+  lineaVista      = false;
   calibBlanco     = 0;
   calibAnterior   = 0;
   calibPasada     = 0;
   if (MODO_PRUEBA == 5) { calibSuma = 0; calibN = 0; calibPromedio = 0; }
   resetVelocidad();
   responder("ARRANCA (modo %d)", MODO_PRUEBA);
+  bool hay = false;
+  for (int i = 0; i < NUM_SENSORES; i++) if (b[i]) hay = true;
+  if (!hay && (MODO_PRUEBA == 0 || MODO_PRUEBA == 2))
+    responder("OJO: ningun sensor ve la linea (sens=000000). Los sensores van SOBRE la linea");
   if (MODO_PRUEBA == 3) empezarGiro(LADO_PRUEBA >= 0 ? +1 : -1, true, "PRUEBA GIRO AISLADO");
 }
 
@@ -482,6 +488,7 @@ void seguir() {
 
   // --- Se ve la propia: PD normal ---
   if (nPropia > 0) {
+    lineaVista = true;
     float e = sumaPropia / nPropia;
     ultimoError     = e;
     ultimaVezPropia = ms;
@@ -522,6 +529,13 @@ void seguir() {
     e = constrain(e, -UMBRAL_BORDE, UMBRAL_BORDE);
     aplicarControl(e, "HUEC");
     logEstado(e);
+    return;
+  }
+
+  // Nunca se vio la línea desde el arranque: no es una V, el carro se
+  // puso mal (los sensores van 11 cm delante del eje, sobre la línea).
+  if (!lineaVista) {
+    detener("no veo la linea desde el arranque: poner los SENSORES sobre ella");
     return;
   }
 
